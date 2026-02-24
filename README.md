@@ -2,6 +2,8 @@
 
 Obsidian plugin for local, private live dictation via [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
 
+![whisperlocal](https://github.com/user-attachments/assets/ed9632a0-2c6e-4eec-8e22-686122f23d5c)
+
 ## Prerequisites
 
 - macOS (whisper service management in this repo uses `launchd`)
