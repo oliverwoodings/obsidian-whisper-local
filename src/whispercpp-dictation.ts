@@ -1,4 +1,5 @@
 import { convertFloat32ToPcm16, postWhisperCppInference } from './whispercpp-http';
+import { normalizeTranscriptChunk, type TranscriptNormalizationReason } from './transcript-normalization';
 
 export interface WhisperCppDictationConfig {
 	baseUrl: string;
@@ -6,11 +7,29 @@ export interface WhisperCppDictationConfig {
 	requestTimeoutMs: number;
 }
 
+type UtteranceReason = 'silence' | 'max_duration';
+export type TranscriptPhase = 'partial' | 'provisional' | 'final';
+
+export interface WhisperCppTranscriptUpdate {
+	text: string;
+	phase: TranscriptPhase;
+	speechSequenceId: number;
+	utteranceDurationMs: number;
+}
+
 interface WhisperCppDictationHandlers {
-	onTranscript: (transcript: string) => void;
+	onTranscript: (update: WhisperCppTranscriptUpdate) => void;
 	onError: (message: string) => void;
 	onDebug?: (message: string, data?: unknown) => void;
 	onStop?: () => void;
+}
+
+interface TranscriptionJob {
+	pcm16: Int16Array;
+	reason: UtteranceReason;
+	speechSequenceId: number;
+	utteranceDurationMs: number;
+	voicedMs: number;
 }
 
 const WORKLET_PROCESSOR = 'whisper-local-pcm-capture';
@@ -34,8 +53,12 @@ registerProcessor('${WORKLET_PROCESSOR}', WhisperLocalPcmCaptureProcessor);
 const VAD_ENERGY_THRESHOLD = 0.008;
 const VAD_SILENCE_MS = 320;
 const VAD_MIN_UTTERANCE_MS = 220;
-const VAD_MAX_UTTERANCE_MS = 2_500;
+const VAD_MAX_UTTERANCE_MS = 3_500;
 const VAD_PREROLL_MS = 180;
+const VAD_MIN_VOICED_MS = 180;
+
+const PARTIAL_REQUEST_INTERVAL_MS = 450;
+const PARTIAL_MIN_VOICED_MS = 320;
 
 export class WhisperCppDictationSession {
 	private readonly config: WhisperCppDictationConfig;
@@ -45,26 +68,40 @@ export class WhisperCppDictationSession {
 	private sourceNode: MediaStreamAudioSourceNode | null = null;
 	private workletNode: AudioWorkletNode | null = null;
 	private silentGainNode: GainNode | null = null;
+
 	private starting = false;
 	private active = false;
-	private sampleRate = 16_000;
+	private sampleRate = TARGET_SAMPLE_RATE;
 	private startedAtMs: number | null = null;
+
 	private audioFrameCount = 0;
 	private audioSampleCount = 0;
 	private utteranceCount = 0;
 	private transcriptCount = 0;
 	private transcriptionRequestCount = 0;
+	private partialRequestCount = 0;
 	private pendingQueueCount = 0;
+
 	private processingQueue = false;
 	private speaking = false;
 	private speakingSilenceMs = 0;
 	private utterancePcmChunks: Int16Array[] = [];
 	private utteranceSampleCount = 0;
+	private utteranceVoicedMs = 0;
 	private preRollChunks: Int16Array[] = [];
 	private preRollSampleCount = 0;
-	private transcriptionQueue: Int16Array[] = [];
+	private transcriptionQueue: TranscriptionJob[] = [];
+
+	private currentSpeechSequenceId = 0;
+	private continueSpeechSequence = false;
+	private finalizedSpeechSequenceId = 0;
+	private partialRequestInFlight = false;
+	private partialRequestQueued = false;
+	private lastPartialRequestAtMs = 0;
+
 	private lastError: string | null = null;
 	private lastTranscriptPreview: string | null = null;
+	private lastCommittedTranscript = '';
 
 	constructor(config: WhisperCppDictationConfig, handlers: WhisperCppDictationHandlers) {
 		this.config = {
@@ -109,6 +146,10 @@ export class WhisperCppDictationSession {
 					silenceMs: VAD_SILENCE_MS,
 					maxUtteranceMs: VAD_MAX_UTTERANCE_MS,
 				},
+				partial: {
+					intervalMs: PARTIAL_REQUEST_INTERVAL_MS,
+					minVoicedMs: PARTIAL_MIN_VOICED_MS,
+				},
 			});
 		} catch (error) {
 			await this.stop();
@@ -124,14 +165,19 @@ export class WhisperCppDictationSession {
 		const wasActive = this.active || this.starting;
 		this.active = false;
 		this.starting = false;
+
 		this.speaking = false;
 		this.speakingSilenceMs = 0;
 		this.utterancePcmChunks = [];
 		this.utteranceSampleCount = 0;
+		this.utteranceVoicedMs = 0;
 		this.preRollChunks = [];
 		this.preRollSampleCount = 0;
 		this.transcriptionQueue = [];
 		this.pendingQueueCount = 0;
+
+		this.partialRequestInFlight = false;
+		this.partialRequestQueued = false;
 
 		await this.cleanupAudio();
 		this.debug('Session stopped and resources released.');
@@ -151,9 +197,12 @@ export class WhisperCppDictationSession {
 			utteranceCount: this.utteranceCount,
 			transcriptCount: this.transcriptCount,
 			transcriptionRequestCount: this.transcriptionRequestCount,
+			partialRequestCount: this.partialRequestCount,
 			pendingQueueCount: this.pendingQueueCount,
 			processingQueue: this.processingQueue,
 			speaking: this.speaking,
+			currentSpeechSequenceId: this.currentSpeechSequenceId,
+			finalizedSpeechSequenceId: this.finalizedSpeechSequenceId,
 			lastError: this.lastError,
 			lastTranscriptPreview: this.lastTranscriptPreview,
 		};
@@ -225,9 +274,14 @@ export class WhisperCppDictationSession {
 		if (!this.speaking && frameRms >= VAD_ENERGY_THRESHOLD) {
 			this.speaking = true;
 			this.speakingSilenceMs = 0;
+			if (!this.continueSpeechSequence) {
+				this.currentSpeechSequenceId += 1;
+			}
+			this.continueSpeechSequence = false;
 			this.absorbPreRollIntoUtterance();
 			this.debug('Speech started.', {
 				frameRms,
+				speechSequenceId: this.currentSpeechSequenceId,
 			});
 		}
 
@@ -239,9 +293,12 @@ export class WhisperCppDictationSession {
 
 		if (frameRms >= VAD_ENERGY_THRESHOLD) {
 			this.speakingSilenceMs = 0;
+			this.utteranceVoicedMs += frameDurationMs;
 		} else {
 			this.speakingSilenceMs += frameDurationMs;
 		}
+
+		void this.maybeRequestPartialTranscription();
 
 		const utteranceDurationMs = this.getUtteranceDurationMs();
 		if (this.speakingSilenceMs >= VAD_SILENCE_MS) {
@@ -281,28 +338,114 @@ export class WhisperCppDictationSession {
 		this.utteranceSampleCount += frame.length;
 	}
 
-	private finalizeUtterance(reason: 'silence' | 'max_duration'): void {
+	private async maybeRequestPartialTranscription(): Promise<void> {
+		if (!this.active || !this.speaking) {
+			return;
+		}
+
+		if (this.utteranceVoicedMs < PARTIAL_MIN_VOICED_MS) {
+			return;
+		}
+
+		const now = Date.now();
+		if (now - this.lastPartialRequestAtMs < PARTIAL_REQUEST_INTERVAL_MS) {
+			return;
+		}
+
+		if (this.partialRequestInFlight) {
+			this.partialRequestQueued = true;
+			return;
+		}
+
+		const snapshotPcm = concatInt16Chunks(this.utterancePcmChunks, this.utteranceSampleCount);
+		if (snapshotPcm.length === 0) {
+			return;
+		}
+
+		const speechSequenceId = this.currentSpeechSequenceId;
+		const utteranceDurationMs = this.getUtteranceDurationMs();
+		this.partialRequestInFlight = true;
+		this.lastPartialRequestAtMs = now;
+		this.partialRequestCount += 1;
+		this.debug('Sending partial hypothesis request.', {
+			speechSequenceId,
+			utteranceDurationMs,
+			requestCount: this.partialRequestCount,
+		});
+
+		try {
+			const result = await postWhisperCppInference({
+				baseUrl: this.config.baseUrl,
+				pcm16: snapshotPcm,
+				sampleRate: this.sampleRate,
+				language: this.config.language,
+				timeoutMs: this.config.requestTimeoutMs,
+			});
+			if (!this.active || speechSequenceId <= this.finalizedSpeechSequenceId) {
+				return;
+			}
+
+			const transcript = this.normalizeTranscript(result.text, 'partial');
+			if (transcript.length === 0) {
+				return;
+			}
+
+			this.publishTranscriptUpdate({
+				text: transcript,
+				phase: 'partial',
+				speechSequenceId,
+				utteranceDurationMs,
+			});
+		} catch (error) {
+			this.debug('Partial hypothesis request failed.', {
+				error: getErrorMessage(error, 'Unknown partial transcription error.'),
+			});
+		} finally {
+			this.partialRequestInFlight = false;
+			if (this.partialRequestQueued) {
+				this.partialRequestQueued = false;
+				void this.maybeRequestPartialTranscription();
+			}
+		}
+	}
+
+	private finalizeUtterance(reason: UtteranceReason): void {
 		const utteranceDurationMs = this.getUtteranceDurationMs();
 		const utterancePcm = concatInt16Chunks(this.utterancePcmChunks, this.utteranceSampleCount);
+		const voicedMs = this.utteranceVoicedMs;
+		const speechSequenceId = this.currentSpeechSequenceId;
+
 		this.utterancePcmChunks = [];
 		this.utteranceSampleCount = 0;
+		this.utteranceVoicedMs = 0;
 		this.speaking = false;
 		this.speakingSilenceMs = 0;
+		this.continueSpeechSequence = reason === 'max_duration';
 
-		if (utteranceDurationMs < VAD_MIN_UTTERANCE_MS || utterancePcm.length === 0) {
+		if (utteranceDurationMs < VAD_MIN_UTTERANCE_MS || voicedMs < VAD_MIN_VOICED_MS || utterancePcm.length === 0) {
 			this.debug('Discarded short utterance.', {
 				reason,
 				utteranceDurationMs,
+				voicedMs,
+				speechSequenceId,
 			});
 			return;
 		}
 
 		this.utteranceCount += 1;
-		this.transcriptionQueue.push(utterancePcm);
+		this.transcriptionQueue.push({
+			pcm16: utterancePcm,
+			reason,
+			speechSequenceId,
+			utteranceDurationMs,
+			voicedMs,
+		});
 		this.pendingQueueCount = this.transcriptionQueue.length;
 		this.debug('Queued utterance for transcription.', {
 			reason,
 			utteranceDurationMs,
+			voicedMs,
+			speechSequenceId,
 			queueLength: this.transcriptionQueue.length,
 		});
 		void this.processTranscriptionQueue();
@@ -325,22 +468,29 @@ export class WhisperCppDictationSession {
 				this.transcriptionRequestCount += 1;
 				this.debug('Sending utterance to whisper.cpp /inference.', {
 					requestCount: this.transcriptionRequestCount,
-					samples: next.length,
+					samples: next.pcm16.length,
 					sampleRate: this.sampleRate,
+					reason: next.reason,
+					speechSequenceId: next.speechSequenceId,
+					utteranceDurationMs: next.utteranceDurationMs,
 					queueLength: this.transcriptionQueue.length,
 				});
 
 				try {
 					const result = await postWhisperCppInference({
 						baseUrl: this.config.baseUrl,
-						pcm16: next,
+						pcm16: next.pcm16,
 						sampleRate: this.sampleRate,
 						language: this.config.language,
 						timeoutMs: this.config.requestTimeoutMs,
 					});
-					const transcript = result.text.trim();
+					const transcript = this.normalizeTranscript(result.text, next.reason);
 					if (transcript.length === 0) {
-						this.debug('Whisper.cpp returned an empty transcript.');
+						this.debug('Transcript dropped after normalization.', {
+							rawLength: result.text.trim().length,
+							reason: next.reason,
+							speechSequenceId: next.speechSequenceId,
+						});
 						continue;
 					}
 
@@ -349,17 +499,24 @@ export class WhisperCppDictationSession {
 						continue;
 					}
 
-					this.transcriptCount += 1;
-					this.lastTranscriptPreview = transcript.slice(0, 120);
-					this.debug('Transcript received from whisper.cpp.', {
-						transcriptCount: this.transcriptCount,
-						transcriptLength: transcript.length,
+					const phase: TranscriptPhase = next.reason === 'silence' ? 'final' : 'provisional';
+					if (phase === 'final') {
+						this.finalizedSpeechSequenceId = Math.max(this.finalizedSpeechSequenceId, next.speechSequenceId);
+						this.lastCommittedTranscript = transcript;
+					}
+
+					this.publishTranscriptUpdate({
+						text: transcript,
+						phase,
+						speechSequenceId: next.speechSequenceId,
+						utteranceDurationMs: next.utteranceDurationMs,
 					});
-					this.handlers.onTranscript(transcript);
 				} catch (error) {
 					this.lastError = getErrorMessage(error, 'whisper.cpp transcription failed.');
 					this.debug('Whisper.cpp transcription request failed.', {
 						error: this.lastError,
+						reason: next.reason,
+						speechSequenceId: next.speechSequenceId,
 					});
 					this.handlers.onError(this.lastError);
 				}
@@ -367,6 +524,21 @@ export class WhisperCppDictationSession {
 		} finally {
 			this.processingQueue = false;
 		}
+	}
+
+	private normalizeTranscript(text: string, reason: TranscriptNormalizationReason): string {
+		return normalizeTranscriptChunk(text, reason, this.lastCommittedTranscript);
+	}
+
+	private publishTranscriptUpdate(update: WhisperCppTranscriptUpdate): void {
+		this.transcriptCount += 1;
+		this.lastTranscriptPreview = update.text.slice(0, 120);
+		this.debug('Transcript update emitted.', {
+			phase: update.phase,
+			speechSequenceId: update.speechSequenceId,
+			transcriptLength: update.text.length,
+		});
+		this.handlers.onTranscript(update);
 	}
 
 	private getUtteranceDurationMs(): number {
@@ -417,17 +589,29 @@ export class WhisperCppDictationSession {
 		this.utteranceCount = 0;
 		this.transcriptCount = 0;
 		this.transcriptionRequestCount = 0;
+		this.partialRequestCount = 0;
 		this.pendingQueueCount = 0;
 		this.processingQueue = false;
+
 		this.speaking = false;
 		this.speakingSilenceMs = 0;
 		this.utterancePcmChunks = [];
 		this.utteranceSampleCount = 0;
+		this.utteranceVoicedMs = 0;
 		this.preRollChunks = [];
 		this.preRollSampleCount = 0;
 		this.transcriptionQueue = [];
+
+		this.currentSpeechSequenceId = 0;
+		this.continueSpeechSequence = false;
+		this.finalizedSpeechSequenceId = 0;
+		this.partialRequestInFlight = false;
+		this.partialRequestQueued = false;
+		this.lastPartialRequestAtMs = 0;
+
 		this.lastError = null;
 		this.lastTranscriptPreview = null;
+		this.lastCommittedTranscript = '';
 	}
 
 	private debug(message: string, data?: unknown): void {

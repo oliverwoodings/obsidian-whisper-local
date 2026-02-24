@@ -106,6 +106,10 @@ npm run whisper:uninstall
   - Client-side microphone capture, VAD segmentation, and live transcription orchestration.
 - `src/whispercpp-http.ts`
   - whisper.cpp HTTP endpoint helpers and multipart WAV transcription request builder.
+- `src/transcript-normalization.ts`
+  - Transcript cleanup and stabilization helpers (non-speech token filtering, boundary overlap stitching, and local-agreement splitting).
+- `src/mutable-tail-widget.ts`
+  - CodeMirror extension for rendering provisional transcript tail text as non-editable, grey inline ghost text.
 - `src/whispercpp-diagnostics.ts`
   - Connectivity and compatibility checks for whisper.cpp endpoints and local runtime prerequisites.
 - `whisper/`
@@ -118,7 +122,10 @@ npm run whisper:uninstall
 - `src/main.ts` may import from `src/settings.ts`.
 - `src/main.ts` may import from `src/whispercpp-dictation.ts`.
 - `src/main.ts` may import from `src/whispercpp-diagnostics.ts`.
+- `src/main.ts` may import from `src/mutable-tail-widget.ts`.
+- `src/main.ts` may import from `src/transcript-normalization.ts`.
 - `src/whispercpp-dictation.ts` may import from `src/whispercpp-http.ts`.
+- `src/whispercpp-dictation.ts` may import from `src/transcript-normalization.ts`.
 - `src/whispercpp-diagnostics.ts` may import from `src/whispercpp-http.ts`.
 - `src/settings.ts` should stay framework-light and focus on data normalization.
 
@@ -128,7 +135,8 @@ npm run whisper:uninstall
 2. Settings are loaded and normalized.
 3. Commands and settings tab are registered.
 4. Starting live dictation captures microphone audio in-browser.
-5. The dictation session applies lightweight VAD to segment utterances.
-6. Segments are sent to `whisper.cpp` `/inference` as WAV multipart requests.
-7. Completed transcript chunks are inserted at the current cursor location in the active note editor.
-8. Diagnostics can be run from settings or command palette to validate endpoint health, inference readiness, and browser capabilities.
+5. The dictation session applies lightweight VAD to segment utterances and sends periodic partial hypothesis requests while speech is active.
+6. Audio segments are sent to `whisper.cpp` `/inference` as WAV multipart requests.
+7. Transcript updates are normalized and stitched, then stabilized via local agreement (stable prefix committed, mutable suffix kept provisional).
+8. The committed text is inserted into the editor while provisional tail text is shown as a grey, non-editable inline widget.
+9. Diagnostics can be run from settings or command palette to validate endpoint health, inference readiness, and browser capabilities.

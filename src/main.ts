@@ -1,12 +1,24 @@
+import { type EditorView } from '@codemirror/view';
 import { App, ButtonComponent, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, setIcon } from 'obsidian';
-import { runWhisperCppDiagnostics, type WhisperCppDiagnosticsReport } from './whispercpp-diagnostics';
-import { WhisperCppDictationSession } from './whispercpp-dictation';
+import { clearMutableTail, setMutableTail, whisperLocalMutableTailExtension } from './mutable-tail-widget';
 import { DEFAULT_SETTINGS, normalizeSettings, type WhisperLocalPluginSettings } from './settings';
+import { splitStableMutableTranscript, takeWordsRange } from './transcript-normalization';
+import { runWhisperCppDiagnostics, type WhisperCppDiagnosticsReport } from './whispercpp-diagnostics';
+import { WhisperCppDictationSession, type WhisperCppTranscriptUpdate } from './whispercpp-dictation';
 
 interface DebugEventEntry {
 	timestamp: string;
 	message: string;
 	data?: unknown;
+}
+
+interface DictationRenderState {
+	editor: Editor;
+	editorView: EditorView | null;
+	insertionOffset: number;
+	activeSequenceId: number | null;
+	sequenceHypotheses: string[];
+	sequenceStableWordCount: number;
 }
 
 class WhisperLocalSettingTab extends PluginSettingTab {
@@ -89,6 +101,7 @@ class WhisperLocalSettingTab extends PluginSettingTab {
 export default class WhisperLocalPlugin extends Plugin {
 	settings: WhisperLocalPluginSettings = { ...DEFAULT_SETTINGS };
 	private dictationSession: WhisperCppDictationSession | null = null;
+	private dictationRenderState: DictationRenderState | null = null;
 	private ribbonToggleEl: HTMLElement | null = null;
 	private readonly debugEvents: DebugEventEntry[] = [];
 	private readonly maxDebugEvents = 200;
@@ -97,6 +110,7 @@ export default class WhisperLocalPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.registerEditorExtension(whisperLocalMutableTailExtension);
 		this.logDebug('Plugin loaded.', {
 			version: this.manifest.version,
 			baseUrl: this.settings.baseUrl,
@@ -154,6 +168,7 @@ export default class WhisperLocalPlugin extends Plugin {
 
 	onunload(): void {
 		this.logDebug('Plugin unloading.');
+		this.resetDictationRenderState();
 		void this.stopLiveDictation(false);
 	}
 
@@ -223,11 +238,15 @@ export default class WhisperLocalPlugin extends Plugin {
 			return;
 		}
 
-		if (!this.getActiveEditor()) {
+		const editor = this.getActiveEditor();
+		if (!editor) {
 			this.logDebug('Start blocked because there is no active editor.');
 			new Notice('Open a note editor before starting live dictation.');
 			return;
 		}
+
+		this.dictationRenderState = this.createDictationRenderState(editor);
+		this.clearMutableTailForRenderState(this.dictationRenderState);
 
 		this.logDebug('Starting live dictation.', {
 			baseUrl: this.settings.baseUrl,
@@ -239,8 +258,8 @@ export default class WhisperLocalPlugin extends Plugin {
 			language: this.settings.language,
 			requestTimeoutMs: this.settings.requestTimeoutMs,
 		}, {
-			onTranscript: (transcript) => {
-				this.insertTranscript(transcript);
+			onTranscript: (update) => {
+				this.handleTranscriptUpdate(update);
 			},
 			onError: (message) => {
 				console.error('[Whisper Local] Live dictation error:', message);
@@ -256,6 +275,7 @@ export default class WhisperLocalPlugin extends Plugin {
 					this.dictationSession = null;
 					this.updateRibbonToggleState();
 				}
+				this.resetDictationRenderState();
 			},
 		});
 
@@ -274,6 +294,7 @@ export default class WhisperLocalPlugin extends Plugin {
 			if (this.dictationSession === session) {
 				this.dictationSession = null;
 			}
+			this.resetDictationRenderState();
 			this.updateRibbonToggleState();
 		}
 	}
@@ -281,6 +302,7 @@ export default class WhisperLocalPlugin extends Plugin {
 	private async stopLiveDictation(showNotice: boolean): Promise<void> {
 		if (!this.dictationSession) {
 			this.logDebug('Stop requested while session is not active.');
+			this.resetDictationRenderState();
 			if (showNotice) {
 				new Notice('Live dictation is not active.');
 			}
@@ -291,6 +313,7 @@ export default class WhisperLocalPlugin extends Plugin {
 		const session = this.dictationSession;
 		this.dictationSession = null;
 		this.updateRibbonToggleState();
+		this.resetDictationRenderState();
 		await session.stop();
 		this.logDebug('Live dictation stopped.');
 		this.updateRibbonToggleState();
@@ -298,6 +321,172 @@ export default class WhisperLocalPlugin extends Plugin {
 		if (showNotice) {
 			new Notice('Live dictation stopped.');
 		}
+	}
+
+	private handleTranscriptUpdate(update: WhisperCppTranscriptUpdate): void {
+		const renderState = this.ensureDictationRenderState();
+		if (!renderState) {
+			this.logDebug('Transcript update dropped because no render state exists.', update);
+			return;
+		}
+
+		if (this.getActiveEditor() !== renderState.editor) {
+			this.logDebug('Stopping live dictation because active editor changed.');
+			void this.stopLiveDictation(false);
+			new Notice('Live dictation stopped because active editor changed.');
+			return;
+		}
+
+		const transcript = update.text.trim();
+		if (transcript.length === 0) {
+			this.logDebug('Transcript update ignored because text is empty after trimming.', update);
+			return;
+		}
+
+		if (renderState.activeSequenceId !== update.speechSequenceId) {
+			renderState.activeSequenceId = update.speechSequenceId;
+			renderState.sequenceHypotheses = [];
+			renderState.sequenceStableWordCount = 0;
+		}
+
+		const previousHypothesis = renderState.sequenceHypotheses[renderState.sequenceHypotheses.length - 1];
+		if (previousHypothesis !== transcript) {
+			renderState.sequenceHypotheses.push(transcript);
+			if (renderState.sequenceHypotheses.length > 4) {
+				renderState.sequenceHypotheses.shift();
+			}
+		}
+
+		if (update.phase === 'final') {
+			const remainder = takeWordsRange(transcript, renderState.sequenceStableWordCount);
+			this.commitTranscriptText(renderState, remainder);
+			this.clearMutableTailForRenderState(renderState);
+			renderState.activeSequenceId = null;
+			renderState.sequenceHypotheses = [];
+			renderState.sequenceStableWordCount = 0;
+			this.logDebug('Final transcript committed.', {
+				speechSequenceId: update.speechSequenceId,
+				remainderLength: remainder.length,
+			});
+			return;
+		}
+
+		const split = splitStableMutableTranscript(
+			renderState.sequenceHypotheses,
+			renderState.sequenceStableWordCount,
+			2,
+		);
+
+		if (split.stableWordCount > renderState.sequenceStableWordCount) {
+			const newlyStable = takeWordsRange(
+				transcript,
+				renderState.sequenceStableWordCount,
+				split.stableWordCount,
+			);
+			this.commitTranscriptText(renderState, newlyStable);
+			renderState.sequenceStableWordCount = split.stableWordCount;
+		}
+
+		this.renderMutableTailText(renderState, split.mutableText);
+		this.logDebug('Applied transcript update.', {
+			phase: update.phase,
+			speechSequenceId: update.speechSequenceId,
+			stableWordCount: renderState.sequenceStableWordCount,
+			mutableLength: split.mutableText.length,
+		});
+	}
+
+	private createDictationRenderState(editor: Editor): DictationRenderState {
+		return {
+			editor,
+			editorView: this.getEditorViewForEditor(editor),
+			insertionOffset: editor.posToOffset(editor.getCursor()),
+			activeSequenceId: null,
+			sequenceHypotheses: [],
+			sequenceStableWordCount: 0,
+		};
+	}
+
+	private ensureDictationRenderState(): DictationRenderState | null {
+		if (this.dictationRenderState) {
+			this.dictationRenderState.editorView = this.getEditorViewForEditor(this.dictationRenderState.editor)
+				?? this.dictationRenderState.editorView;
+			return this.dictationRenderState;
+		}
+
+		const editor = this.getActiveEditor();
+		if (!editor) {
+			return null;
+		}
+
+		this.dictationRenderState = this.createDictationRenderState(editor);
+		return this.dictationRenderState;
+	}
+
+	private resetDictationRenderState(): void {
+		if (this.dictationRenderState) {
+			this.clearMutableTailForRenderState(this.dictationRenderState);
+		}
+		this.dictationRenderState = null;
+	}
+
+	private commitTranscriptText(renderState: DictationRenderState, transcript: string): void {
+		const text = formatTranscriptForInsertionAtOffset(
+			renderState.editor,
+			renderState.insertionOffset,
+			transcript,
+		);
+		if (!text) {
+			return;
+		}
+
+		this.clearMutableTailForRenderState(renderState);
+		const insertionStart = renderState.editor.offsetToPos(renderState.insertionOffset);
+		renderState.editor.replaceRange(text, insertionStart);
+		renderState.insertionOffset += text.length;
+		const insertionEnd = renderState.editor.offsetToPos(renderState.insertionOffset);
+		renderState.editor.setCursor(insertionEnd);
+	}
+
+	private renderMutableTailText(renderState: DictationRenderState, mutableTail: string): void {
+		const editorView = renderState.editorView ?? this.getEditorViewForEditor(renderState.editor);
+		if (!editorView) {
+			return;
+		}
+		renderState.editorView = editorView;
+
+		const normalized = mutableTail.trim();
+		if (normalized.length === 0) {
+			clearMutableTail(editorView);
+			return;
+		}
+
+		const prefix = needsLeadingSpace(renderState.editor, renderState.insertionOffset) ? ' ' : '';
+		setMutableTail(editorView, renderState.insertionOffset, `${prefix}${normalized}`);
+	}
+
+	private clearMutableTailForRenderState(renderState: DictationRenderState): void {
+		const editorView = renderState.editorView ?? this.getEditorViewForEditor(renderState.editor);
+		if (!editorView) {
+			return;
+		}
+		renderState.editorView = editorView;
+		clearMutableTail(editorView);
+	}
+
+	private getActiveEditor(): Editor | null {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		return view?.editor ?? null;
+	}
+
+	private getEditorViewForEditor(editor: Editor): EditorView | null {
+		const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!markdownView || markdownView.editor !== editor) {
+			return null;
+		}
+
+		const editorCandidate = markdownView.editor as Editor & { cm?: EditorView };
+		return editorCandidate.cm ?? null;
 	}
 
 	private updateRibbonToggleState(): void {
@@ -311,40 +500,6 @@ export default class WhisperLocalPlugin extends Plugin {
 		this.ribbonToggleEl.setAttribute('aria-label', tooltip);
 		this.ribbonToggleEl.setAttribute('title', tooltip);
 		this.ribbonToggleEl.classList.toggle('is-active', isActive);
-	}
-
-	private insertTranscript(transcript: string): void {
-		const editor = this.getActiveEditor();
-		if (!editor) {
-			this.logDebug('Transcript dropped because no active editor.', {
-				transcriptLength: transcript.length,
-			});
-			new Notice('Transcription received, but there is no active note editor.');
-			return;
-		}
-
-		const text = formatTranscriptForInsertion(editor, transcript);
-		if (!text) {
-			this.logDebug('Transcript ignored after normalization.', {
-				transcriptLength: transcript.length,
-			});
-			return;
-		}
-
-		const insertionStart = editor.getCursor();
-		const insertionStartOffset = editor.posToOffset(insertionStart);
-		editor.replaceRange(text, insertionStart);
-		const insertionEnd = editor.offsetToPos(insertionStartOffset + text.length);
-		editor.setCursor(insertionEnd);
-		this.logDebug('Transcript inserted into editor.', {
-			transcriptLength: transcript.length,
-			insertedLength: text.length,
-		});
-	}
-
-	private getActiveEditor(): Editor | null {
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		return view?.editor ?? null;
 	}
 
 	private logDebug(message: string, data?: unknown): void {
@@ -384,6 +539,13 @@ export default class WhisperLocalPlugin extends Plugin {
 				enableDebugLogging: this.settings.enableDebugLogging,
 			},
 			session: sessionSnapshot,
+			renderState: this.dictationRenderState
+				? {
+					insertionOffset: this.dictationRenderState.insertionOffset,
+					activeSequenceId: this.dictationRenderState.activeSequenceId,
+					stableWordCount: this.dictationRenderState.sequenceStableWordCount,
+				}
+				: null,
 			lastDiagnosticsSummary: this.lastDiagnosticsReport?.summary ?? null,
 			recentEvents: this.debugEvents.slice(-60),
 		};
@@ -411,18 +573,24 @@ export default class WhisperLocalPlugin extends Plugin {
 	}
 }
 
-function formatTranscriptForInsertion(editor: Editor, transcript: string): string {
+function formatTranscriptForInsertionAtOffset(editor: Editor, insertionOffset: number, transcript: string): string {
 	const normalized = transcript.trim();
 	if (normalized.length === 0) {
 		return '';
 	}
 
-	const cursor = editor.getCursor();
-	const currentLine = editor.getLine(cursor.line);
-	const characterBeforeCursor = cursor.ch > 0 ? currentLine.charAt(cursor.ch - 1) : '';
-	const prefix = characterBeforeCursor.length > 0 && !/\s/.test(characterBeforeCursor)
-		? ' '
-		: '';
-
+	const prefix = needsLeadingSpace(editor, insertionOffset) ? ' ' : '';
 	return `${prefix}${normalized} `;
+}
+
+function needsLeadingSpace(editor: Editor, insertionOffset: number): boolean {
+	if (insertionOffset <= 0) {
+		return false;
+	}
+
+	const previousChar = editor.getRange(
+		editor.offsetToPos(insertionOffset - 1),
+		editor.offsetToPos(insertionOffset),
+	);
+	return previousChar.length > 0 && !/\s/.test(previousChar);
 }
