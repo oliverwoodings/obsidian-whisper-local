@@ -15,7 +15,10 @@
 		"whisper:setup": "bash ./whisper/setup.sh",
 		"whisper:start": "bash ./whisper/start.sh",
 		"whisper:logs": "bash ./whisper/logs.sh",
-		"whisper:stop": "bash ./whisper/stop.sh"
+		"whisper:stop": "bash ./whisper/stop.sh",
+		"whisper:status": "bash ./whisper/status.sh",
+		"whisper:install-service": "bash ./whisper/service-install.sh",
+		"whisper:uninstall": "bash ./whisper/uninstall.sh"
 	},
 	"keywords": [
 		"obsidian",

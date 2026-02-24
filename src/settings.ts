@@ -12,7 +12,7 @@ export const DEFAULT_SETTINGS: WhisperLocalPluginSettings = {
 	baseUrl: 'http://127.0.0.1:8080',
 	language: 'en',
 	requestTimeoutMs: 45_000,
-	enableDebugLogging: true,
+	enableDebugLogging: false,
 };
 
 export function normalizeSettings(loaded: unknown): WhisperLocalPluginSettings {

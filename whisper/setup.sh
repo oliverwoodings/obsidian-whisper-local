@@ -2,47 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
-ENV_EXAMPLE_FILE="${SCRIPT_DIR}/.env.example"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/common.sh"
 
-if [[ ! -f "${ENV_FILE}" ]]; then
-	cp "${ENV_EXAMPLE_FILE}" "${ENV_FILE}"
-	echo "Created ${ENV_FILE} from ${ENV_EXAMPLE_FILE}."
-fi
-
-set -a
-# shellcheck disable=SC1090
-source "${ENV_FILE}"
-set +a
-
-WHISPER_REPO_URL="${WHISPER_REPO_URL:-https://github.com/ggml-org/whisper.cpp.git}"
-WHISPER_REPO_REF="${WHISPER_REPO_REF:-main}"
-WHISPER_SRC_DIR="${WHISPER_SRC_DIR:-./whisper/whisper.cpp-src}"
-WHISPER_BUILD_DIR="${WHISPER_BUILD_DIR:-./whisper/build}"
-WHISPER_MODEL="${WHISPER_MODEL:-base.en}"
-WHISPER_MODEL_FILE="${WHISPER_MODEL_FILE:-ggml-${WHISPER_MODEL}.bin}"
-WHISPER_MODEL_DIR="${WHISPER_MODEL_DIR:-./whisper/models}"
-WHISPER_MODEL_URL="${WHISPER_MODEL_URL:-}"
-WHISPER_HOST="${WHISPER_HOST:-127.0.0.1}"
-WHISPER_PORT="${WHISPER_PORT:-8080}"
-
-resolve_path() {
-	local value="$1"
-	if [[ "${value}" == /* ]]; then
-		printf '%s\n' "${value}"
-	else
-		printf '%s\n' "${REPO_ROOT}/${value#./}"
-	fi
-}
-
-require_command() {
-	local command_name="$1"
-	if ! command -v "${command_name}" >/dev/null 2>&1; then
-		echo "Missing required command: ${command_name}" >&2
-		exit 1
-	fi
-}
+WHISPER_REPO_URL_DEFAULT="https://github.com/ggml-org/whisper.cpp.git"
+WHISPER_REPO_REF_DEFAULT="main"
 
 cpu_count() {
 	if command -v nproc >/dev/null 2>&1; then
@@ -79,65 +43,46 @@ ensure_repo_checked_out() {
 	echo "Using existing whisper.cpp checkout: ${src_dir}"
 }
 
-find_server_binary() {
-	local build_dir="$1"
-	local candidates=(
-		"${build_dir}/bin/whisper-server"
-		"${build_dir}/bin/Release/whisper-server"
-		"${build_dir}/Release/bin/whisper-server"
-	)
+main() {
+	load_runtime
 
-	for candidate in "${candidates[@]}"; do
-		if [[ -x "${candidate}" ]]; then
-			printf '%s\n' "${candidate}"
-			return 0
-		fi
-	done
+	local whisper_repo_url="${WHISPER_REPO_URL:-${WHISPER_REPO_URL_DEFAULT}}"
+	local whisper_repo_ref="${WHISPER_REPO_REF:-${WHISPER_REPO_REF_DEFAULT}}"
+	local whisper_model_url="${WHISPER_MODEL_URL:-}"
+	if [[ -z "${whisper_model_url}" ]]; then
+		whisper_model_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL_FILE}"
+	fi
 
-	return 1
-}
+	require_command git
+	require_command cmake
+	require_command curl
 
-require_command git
-require_command cmake
-require_command curl
+	mkdir -p "${WHISPER_MODEL_DIR}"
+	ensure_repo_checked_out "${WHISPER_SRC_DIR}" "${whisper_repo_url}" "${whisper_repo_ref}"
 
-WHISPER_SRC_DIR="$(resolve_path "${WHISPER_SRC_DIR}")"
-WHISPER_BUILD_DIR="$(resolve_path "${WHISPER_BUILD_DIR}")"
-WHISPER_MODEL_DIR="$(resolve_path "${WHISPER_MODEL_DIR}")"
-mkdir -p "${WHISPER_MODEL_DIR}"
+	echo "Configuring whisper.cpp build..."
+	cmake -S "${WHISPER_SRC_DIR}" -B "${WHISPER_BUILD_DIR}" \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DWHISPER_BUILD_EXAMPLES=ON
 
-ensure_repo_checked_out "${WHISPER_SRC_DIR}" "${WHISPER_REPO_URL}" "${WHISPER_REPO_REF}"
+	echo "Building whisper.cpp (this may take a few minutes)..."
+	cmake --build "${WHISPER_BUILD_DIR}" --config Release -j "$(cpu_count)"
 
-echo "Configuring whisper.cpp build..."
-cmake -S "${WHISPER_SRC_DIR}" -B "${WHISPER_BUILD_DIR}" \
-	-DCMAKE_BUILD_TYPE=Release \
-	-DWHISPER_BUILD_EXAMPLES=ON
+	assert_runtime_ready
 
-echo "Building whisper.cpp (this may take a few minutes)..."
-cmake --build "${WHISPER_BUILD_DIR}" --config Release -j "$(cpu_count)"
+	if [[ -f "${MODEL_PATH}" ]]; then
+		echo "Model already present: ${MODEL_PATH}"
+	else
+		echo "Downloading model: ${WHISPER_MODEL_FILE}"
+		echo "Source: ${whisper_model_url}"
+		curl -fL --progress-bar "${whisper_model_url}" -o "${MODEL_PATH}"
+		echo "Model downloaded to: ${MODEL_PATH}"
+	fi
 
-SERVER_BIN="$(find_server_binary "${WHISPER_BUILD_DIR}" || true)"
-if [[ -z "${SERVER_BIN}" ]]; then
-	echo "Build completed, but whisper-server binary was not found." >&2
-	echo "Checked under: ${WHISPER_BUILD_DIR}/bin" >&2
-	exit 1
-fi
+	echo "Installing launchd service definition..."
+	"${SCRIPT_DIR}/service-install.sh"
 
-MODEL_PATH="${WHISPER_MODEL_DIR}/${WHISPER_MODEL_FILE}"
-if [[ -z "${WHISPER_MODEL_URL}" ]]; then
-	WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL_FILE}"
-fi
-
-if [[ -f "${MODEL_PATH}" ]]; then
-	echo "Model already present: ${MODEL_PATH}"
-else
-	echo "Downloading model: ${WHISPER_MODEL_FILE}"
-	echo "Source: ${WHISPER_MODEL_URL}"
-	curl -fL --progress-bar "${WHISPER_MODEL_URL}" -o "${MODEL_PATH}"
-	echo "Model downloaded to: ${MODEL_PATH}"
-fi
-
-cat <<MSG
+	cat <<MSG
 
 whisper.cpp native setup complete.
 
@@ -147,9 +92,18 @@ Current configuration:
 - build dir: ${WHISPER_BUILD_DIR}
 - server binary: ${SERVER_BIN}
 - model: ${MODEL_PATH}
+- launchd label: ${WHISPER_LAUNCHD_LABEL}
+- launchd plist: ${WHISPER_LAUNCHD_PLIST}
 - server URL for plugin settings: http://${WHISPER_HOST}:${WHISPER_PORT}
 
-Next step:
-- Start server: npm run whisper:start
+Service management:
+- start: npm run whisper:start
+- stop: npm run whisper:stop
+- status: npm run whisper:status
+- logs: npm run whisper:logs
+- uninstall launchd service: npm run whisper:uninstall
 
 MSG
+}
+
+main "$@"

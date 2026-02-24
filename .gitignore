@@ -24,6 +24,7 @@ whisper/models/
 whisper/whisper.cpp-src/
 whisper/build/
 whisper/whisper-server.log
+whisper/whisper-server.error.log
 whisper/whisper-server.pid
 
 # Exclude macOS Finder (System Explorer) View States

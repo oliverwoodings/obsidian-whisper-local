@@ -1,6 +1,59 @@
 # Obsidian Whisper Local
 
-Obsidian Community Plugin scaffold for local, private live dictation via [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
+Obsidian plugin for local, private live dictation via [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
+
+## Prerequisites
+
+- macOS (whisper service management in this repo uses `launchd`)
+- Node.js 18+ and npm
+- CMake
+- Git
+- curl
+
+## Quick start (unpublished plugin)
+
+This plugin is not published in Obsidian Community Plugins yet, so install it manually.
+
+1. Clone this repository and build the plugin:
+
+```bash
+git clone <repo-url>
+cd obsidian-whisper-local
+npm install
+npm run build
+```
+
+2. Install into your vault's plugins folder (use your vault path):
+
+```bash
+mkdir -p "/path/to/YourVault/.obsidian/plugins"
+ln -s "$(pwd)" "/path/to/YourVault/.obsidian/plugins/obsidian-whisper-local"
+```
+
+3. In Obsidian, open **Settings -> Community plugins**:
+- Disable restricted mode if needed.
+- Enable `Whisper Local`.
+
+4. Set up and start local whisper.cpp (macOS):
+
+```bash
+npm run whisper:setup
+npm run whisper:start
+```
+
+5. Plugin settings are usable out of the box (defaults):
+- Base URL: `http://127.0.0.1:8080`
+- Language: `en`
+
+Only change these in **Settings -> Community plugins -> Whisper Local** if your setup differs (for example, different port or language).
+
+6. Use commands:
+- `Whisper Local: Start live dictation`
+- `Whisper Local: Stop live dictation`
+
+Or use the ribbon button to toggle live dictation on/off.
+
+Optional: bind these commands to hotkeys in **Settings -> Hotkeys** for faster start/stop control.
 
 ## Development
 
@@ -17,20 +70,26 @@ npm run build
 
 ## Local whisper.cpp setup
 
-The repository includes helper scripts in `whisper/` for local server setup:
+The repository includes helper scripts in `whisper/` for local server setup on macOS:
 
 ```bash
 npm run whisper:setup
 npm run whisper:start
-npm run whisper:logs
 npm run whisper:stop
+npm run whisper:status
+npm run whisper:logs
+npm run whisper:install-service
+npm run whisper:uninstall
 ```
 
-- `whisper:setup` copies `whisper/.env` from `whisper/.env.example`, clones/builds whisper.cpp natively, and downloads the configured model.
-- `whisper:start` launches the local `whisper-server` binary using settings from `whisper/.env`.
-- `whisper:logs` tails the detached server log file.
-- `whisper:stop` stops the detached server using the pid file.
-- Detached mode is enabled by default (`WHISPER_DETACH=1`). Set `WHISPER_DETACH=0` to run in the foreground.
+- `whisper:setup` copies `whisper/.env` from `whisper/.env.example`, clones/builds whisper.cpp natively, downloads the configured model, and installs a macOS `launchd` service.
+- `whisper:start` starts the `launchd` service.
+- `whisper:stop` stops the `launchd` service.
+- `whisper:status` prints `launchd` service status.
+- `whisper:logs` tails service stdout/stderr logs configured in `whisper/.env`.
+- `whisper:install-service` rewrites/reinstalls the `launchd` plist from current `.env` values.
+- `whisper:uninstall` unloads and removes the `launchd` service plist.
+- Service defaults are generic and user-portable (`$HOME/Library/LaunchAgents/...`), and can be changed via `whisper/.env`.
 
 ## Architecture
 
@@ -71,8 +130,3 @@ npm run whisper:stop
 6. Segments are sent to `whisper.cpp` `/inference` as WAV multipart requests.
 7. Completed transcript chunks are inserted at the current cursor location in the active note editor.
 8. Diagnostics can be run from settings or command palette to validate endpoint health, inference readiness, and browser capabilities.
-
-## Next milestone
-
-- Add integration tests that mock transcription responses against editor insertion behavior.
-- Add status bar state for active dictation and queued utterances.
