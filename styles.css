@@ -1,7 +1,7 @@
 .whisper-local-mutable-tail {
 	color: var(--text-faint);
 	font-style: italic;
-	opacity: 0.8;
+	opacity: var(--whisper-local-mutable-tail-opacity, 0.8);
 	pointer-events: none;
 	user-select: none;
 }

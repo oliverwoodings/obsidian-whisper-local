@@ -5,6 +5,8 @@ export interface WhisperCppDictationConfig {
 	baseUrl: string;
 	language?: string;
 	requestTimeoutMs: number;
+	partialRequestIntervalMs: number;
+	partialMinVoicedMs: number;
 }
 
 type UtteranceReason = 'silence' | 'max_duration';
@@ -57,12 +59,14 @@ const VAD_MAX_UTTERANCE_MS = 3_500;
 const VAD_PREROLL_MS = 180;
 const VAD_MIN_VOICED_MS = 180;
 
-const PARTIAL_REQUEST_INTERVAL_MS = 450;
-const PARTIAL_MIN_VOICED_MS = 320;
+const DEFAULT_PARTIAL_REQUEST_INTERVAL_MS = 450;
+const DEFAULT_PARTIAL_MIN_VOICED_MS = 320;
 
 export class WhisperCppDictationSession {
 	private readonly config: WhisperCppDictationConfig;
 	private readonly handlers: WhisperCppDictationHandlers;
+	private readonly partialRequestIntervalMs: number;
+	private readonly partialMinVoicedMs: number;
 	private mediaStream: MediaStream | null = null;
 	private audioContext: AudioContext | null = null;
 	private sourceNode: MediaStreamAudioSourceNode | null = null;
@@ -108,7 +112,11 @@ export class WhisperCppDictationSession {
 			baseUrl: config.baseUrl.trim(),
 			language: config.language?.trim(),
 			requestTimeoutMs: config.requestTimeoutMs,
+			partialRequestIntervalMs: config.partialRequestIntervalMs,
+			partialMinVoicedMs: config.partialMinVoicedMs,
 		};
+		this.partialRequestIntervalMs = config.partialRequestIntervalMs || DEFAULT_PARTIAL_REQUEST_INTERVAL_MS;
+		this.partialMinVoicedMs = config.partialMinVoicedMs || DEFAULT_PARTIAL_MIN_VOICED_MS;
 		this.handlers = handlers;
 	}
 
@@ -147,8 +155,8 @@ export class WhisperCppDictationSession {
 					maxUtteranceMs: VAD_MAX_UTTERANCE_MS,
 				},
 				partial: {
-					intervalMs: PARTIAL_REQUEST_INTERVAL_MS,
-					minVoicedMs: PARTIAL_MIN_VOICED_MS,
+					intervalMs: this.partialRequestIntervalMs,
+					minVoicedMs: this.partialMinVoicedMs,
 				},
 			});
 		} catch (error) {
@@ -343,12 +351,12 @@ export class WhisperCppDictationSession {
 			return;
 		}
 
-		if (this.utteranceVoicedMs < PARTIAL_MIN_VOICED_MS) {
+		if (this.utteranceVoicedMs < this.partialMinVoicedMs) {
 			return;
 		}
 
 		const now = Date.now();
-		if (now - this.lastPartialRequestAtMs < PARTIAL_REQUEST_INTERVAL_MS) {
+		if (now - this.lastPartialRequestAtMs < this.partialRequestIntervalMs) {
 			return;
 		}
 

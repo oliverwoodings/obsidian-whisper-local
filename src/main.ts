@@ -70,6 +70,66 @@ class WhisperLocalSettingTab extends PluginSettingTab {
 					this.plugin.settings.requestTimeoutMs = Number.isFinite(parsed)
 						? parsed
 						: DEFAULT_SETTINGS.requestTimeoutMs;
+						await this.plugin.saveSettings();
+					}));
+
+		new Setting(containerEl)
+			.setName('Realtime tuning')
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName('Partial update interval (ms)')
+			.setDesc('How often to request provisional transcript updates while speaking. Lower is faster but noisier.')
+			.addText((text) => text
+				.setPlaceholder(String(DEFAULT_SETTINGS.partialRequestIntervalMs))
+				.setValue(String(this.plugin.settings.partialRequestIntervalMs))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value.trim(), 10);
+					this.plugin.settings.partialRequestIntervalMs = Number.isFinite(parsed)
+						? parsed
+						: DEFAULT_SETTINGS.partialRequestIntervalMs;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Partial minimum voiced audio (ms)')
+			.setDesc('Minimum voiced audio before partial hypothesis requests begin.')
+			.addText((text) => text
+				.setPlaceholder(String(DEFAULT_SETTINGS.partialMinVoicedMs))
+				.setValue(String(this.plugin.settings.partialMinVoicedMs))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value.trim(), 10);
+					this.plugin.settings.partialMinVoicedMs = Number.isFinite(parsed)
+						? parsed
+						: DEFAULT_SETTINGS.partialMinVoicedMs;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Stabilization agreement window')
+			.setDesc('Number of consecutive hypotheses that must agree before words are committed.')
+			.addText((text) => text
+				.setPlaceholder(String(DEFAULT_SETTINGS.stabilizationAgreementWindow))
+				.setValue(String(this.plugin.settings.stabilizationAgreementWindow))
+				.onChange(async (value) => {
+					const parsed = Number.parseInt(value.trim(), 10);
+					this.plugin.settings.stabilizationAgreementWindow = Number.isFinite(parsed)
+						? parsed
+						: DEFAULT_SETTINGS.stabilizationAgreementWindow;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Mutable tail opacity')
+			.setDesc('Opacity for provisional (not-yet-committed) transcript text, from 0.15 to 1.0.')
+			.addText((text) => text
+				.setPlaceholder(String(DEFAULT_SETTINGS.mutableTailOpacity))
+				.setValue(this.plugin.settings.mutableTailOpacity.toString())
+				.onChange(async (value) => {
+					const parsed = Number.parseFloat(value.trim());
+					this.plugin.settings.mutableTailOpacity = Number.isFinite(parsed)
+						? parsed
+						: DEFAULT_SETTINGS.mutableTailOpacity;
 					await this.plugin.saveSettings();
 				}));
 
@@ -110,12 +170,17 @@ export default class WhisperLocalPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.applyMutableTailAppearance();
 		this.registerEditorExtension(whisperLocalMutableTailExtension);
 		this.logDebug('Plugin loaded.', {
 			version: this.manifest.version,
 			baseUrl: this.settings.baseUrl,
 			language: this.settings.language || null,
 			requestTimeoutMs: this.settings.requestTimeoutMs,
+			partialRequestIntervalMs: this.settings.partialRequestIntervalMs,
+			partialMinVoicedMs: this.settings.partialMinVoicedMs,
+			stabilizationAgreementWindow: this.settings.stabilizationAgreementWindow,
+			mutableTailOpacity: this.settings.mutableTailOpacity,
 		});
 
 		this.addCommand({
@@ -169,6 +234,7 @@ export default class WhisperLocalPlugin extends Plugin {
 	onunload(): void {
 		this.logDebug('Plugin unloading.');
 		this.resetDictationRenderState();
+		document.body.style.removeProperty('--whisper-local-mutable-tail-opacity');
 		void this.stopLiveDictation(false);
 	}
 
@@ -180,6 +246,7 @@ export default class WhisperLocalPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		this.settings = normalizeSettings(this.settings);
 		await this.saveData(this.settings);
+		this.applyMutableTailAppearance();
 	}
 
 	async runWhisperCppDiagnostics(button?: ButtonComponent): Promise<void> {
@@ -257,6 +324,8 @@ export default class WhisperLocalPlugin extends Plugin {
 			baseUrl: this.settings.baseUrl,
 			language: this.settings.language,
 			requestTimeoutMs: this.settings.requestTimeoutMs,
+			partialRequestIntervalMs: this.settings.partialRequestIntervalMs,
+			partialMinVoicedMs: this.settings.partialMinVoicedMs,
 		}, {
 			onTranscript: (update) => {
 				this.handleTranscriptUpdate(update);
@@ -350,12 +419,13 @@ export default class WhisperLocalPlugin extends Plugin {
 		}
 
 		const previousHypothesis = renderState.sequenceHypotheses[renderState.sequenceHypotheses.length - 1];
-		if (previousHypothesis !== transcript) {
-			renderState.sequenceHypotheses.push(transcript);
-			if (renderState.sequenceHypotheses.length > 4) {
-				renderState.sequenceHypotheses.shift();
+			if (previousHypothesis !== transcript) {
+				renderState.sequenceHypotheses.push(transcript);
+				const maxHypothesisHistory = Math.max(this.settings.stabilizationAgreementWindow + 2, 4);
+				if (renderState.sequenceHypotheses.length > maxHypothesisHistory) {
+					renderState.sequenceHypotheses.shift();
+				}
 			}
-		}
 
 		if (update.phase === 'final') {
 			const remainder = takeWordsRange(transcript, renderState.sequenceStableWordCount);
@@ -371,11 +441,11 @@ export default class WhisperLocalPlugin extends Plugin {
 			return;
 		}
 
-		const split = splitStableMutableTranscript(
-			renderState.sequenceHypotheses,
-			renderState.sequenceStableWordCount,
-			2,
-		);
+			const split = splitStableMutableTranscript(
+				renderState.sequenceHypotheses,
+				renderState.sequenceStableWordCount,
+				this.settings.stabilizationAgreementWindow,
+			);
 
 		if (split.stableWordCount > renderState.sequenceStableWordCount) {
 			const newlyStable = takeWordsRange(
@@ -502,6 +572,13 @@ export default class WhisperLocalPlugin extends Plugin {
 		this.ribbonToggleEl.classList.toggle('is-active', isActive);
 	}
 
+	private applyMutableTailAppearance(): void {
+		document.body.style.setProperty(
+			'--whisper-local-mutable-tail-opacity',
+			this.settings.mutableTailOpacity.toString(),
+		);
+	}
+
 	private logDebug(message: string, data?: unknown): void {
 		const entry: DebugEventEntry = {
 			timestamp: new Date().toISOString(),
@@ -532,12 +609,16 @@ export default class WhisperLocalPlugin extends Plugin {
 		const snapshot = {
 			timestamp: new Date().toISOString(),
 			pluginVersion: this.manifest.version,
-			settings: {
-				baseUrl: this.settings.baseUrl,
-				language: this.settings.language || null,
-				requestTimeoutMs: this.settings.requestTimeoutMs,
-				enableDebugLogging: this.settings.enableDebugLogging,
-			},
+				settings: {
+					baseUrl: this.settings.baseUrl,
+					language: this.settings.language || null,
+					requestTimeoutMs: this.settings.requestTimeoutMs,
+					partialRequestIntervalMs: this.settings.partialRequestIntervalMs,
+					partialMinVoicedMs: this.settings.partialMinVoicedMs,
+					stabilizationAgreementWindow: this.settings.stabilizationAgreementWindow,
+					mutableTailOpacity: this.settings.mutableTailOpacity,
+					enableDebugLogging: this.settings.enableDebugLogging,
+				},
 			session: sessionSnapshot,
 			renderState: this.dictationRenderState
 				? {

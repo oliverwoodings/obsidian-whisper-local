@@ -49,6 +49,12 @@ npm run whisper:start
 
 Only change these in **Settings -> Community plugins -> Whisper Local** if your setup differs (for example, different port or language).
 
+Optional tuning (same settings panel):
+- Partial update interval (ms)
+- Partial minimum voiced audio (ms)
+- Stabilization agreement window
+- Mutable tail opacity
+
 6. Use commands:
 - `Whisper Local: Start live dictation`
 - `Whisper Local: Stop live dictation`
