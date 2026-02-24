@@ -1,0 +1,9 @@
+{
+	"id": "obsidian-whisper-local",
+	"name": "Whisper Local",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "Local, private live dictation in Obsidian via whisper.cpp.",
+	"author": "Oliver Woodings",
+	"isDesktopOnly": true
+}

@@ -1,0 +1,30 @@
+# vscode
+.vscode 
+
+# Intellij
+*.iml
+.idea
+
+# npm
+node_modules
+
+# Don't include the compiled main.js file in the repo.
+# They should be uploaded to GitHub releases instead.
+main.js
+
+# Exclude sourcemaps
+*.map
+
+# obsidian
+data.json
+
+# local whisper.cpp tooling
+whisper/.env
+whisper/models/
+whisper/whisper.cpp-src/
+whisper/build/
+whisper/whisper-server.log
+whisper/whisper-server.pid
+
+# Exclude macOS Finder (System Explorer) View States
+.DS_Store
