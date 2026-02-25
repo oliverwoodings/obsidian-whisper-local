@@ -413,6 +413,7 @@ export default class WhisperLocalPlugin extends Plugin {
 		}
 
 		if (renderState.activeSequenceId !== update.speechSequenceId) {
+			this.flushPendingSequenceTail(renderState, 'sequence_switch');
 			renderState.activeSequenceId = update.speechSequenceId;
 			renderState.sequenceHypotheses = [];
 			renderState.sequenceStableWordCount = 0;
@@ -495,9 +496,26 @@ export default class WhisperLocalPlugin extends Plugin {
 
 	private resetDictationRenderState(): void {
 		if (this.dictationRenderState) {
+			this.flushPendingSequenceTail(this.dictationRenderState, 'state_reset');
 			this.clearMutableTailForRenderState(this.dictationRenderState);
 		}
 		this.dictationRenderState = null;
+	}
+
+	private flushPendingSequenceTail(renderState: DictationRenderState, reason: string): void {
+		const latestHypothesis = renderState.sequenceHypotheses[renderState.sequenceHypotheses.length - 1];
+		if (!latestHypothesis) {
+			return;
+		}
+
+		const pendingRemainder = takeWordsRange(latestHypothesis, renderState.sequenceStableWordCount);
+		if (pendingRemainder.length > 0) {
+			this.commitTranscriptText(renderState, pendingRemainder);
+			this.logDebug('Flushed pending mutable tail.', {
+				reason,
+				flushedLength: pendingRemainder.length,
+			});
+		}
 	}
 
 	private commitTranscriptText(renderState: DictationRenderState, transcript: string): void {

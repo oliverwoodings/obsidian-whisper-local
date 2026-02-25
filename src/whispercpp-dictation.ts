@@ -97,7 +97,6 @@ export class WhisperCppDictationSession {
 	private transcriptionQueue: TranscriptionJob[] = [];
 
 	private currentSpeechSequenceId = 0;
-	private continueSpeechSequence = false;
 	private finalizedSpeechSequenceId = 0;
 	private partialRequestInFlight = false;
 	private partialRequestQueued = false;
@@ -282,10 +281,7 @@ export class WhisperCppDictationSession {
 		if (!this.speaking && frameRms >= VAD_ENERGY_THRESHOLD) {
 			this.speaking = true;
 			this.speakingSilenceMs = 0;
-			if (!this.continueSpeechSequence) {
-				this.currentSpeechSequenceId += 1;
-			}
-			this.continueSpeechSequence = false;
+			this.currentSpeechSequenceId += 1;
 			this.absorbPreRollIntoUtterance();
 			this.debug('Speech started.', {
 				frameRms,
@@ -428,7 +424,6 @@ export class WhisperCppDictationSession {
 		this.utteranceVoicedMs = 0;
 		this.speaking = false;
 		this.speakingSilenceMs = 0;
-		this.continueSpeechSequence = reason === 'max_duration';
 
 		if (utteranceDurationMs < VAD_MIN_UTTERANCE_MS || voicedMs < VAD_MIN_VOICED_MS || utterancePcm.length === 0) {
 			this.debug('Discarded short utterance.', {
@@ -507,11 +502,9 @@ export class WhisperCppDictationSession {
 						continue;
 					}
 
-					const phase: TranscriptPhase = next.reason === 'silence' ? 'final' : 'provisional';
-					if (phase === 'final') {
-						this.finalizedSpeechSequenceId = Math.max(this.finalizedSpeechSequenceId, next.speechSequenceId);
-						this.lastCommittedTranscript = transcript;
-					}
+					const phase: TranscriptPhase = 'final';
+					this.finalizedSpeechSequenceId = Math.max(this.finalizedSpeechSequenceId, next.speechSequenceId);
+					this.lastCommittedTranscript = transcript;
 
 					this.publishTranscriptUpdate({
 						text: transcript,
@@ -611,7 +604,6 @@ export class WhisperCppDictationSession {
 		this.transcriptionQueue = [];
 
 		this.currentSpeechSequenceId = 0;
-		this.continueSpeechSequence = false;
 		this.finalizedSpeechSequenceId = 0;
 		this.partialRequestInFlight = false;
 		this.partialRequestQueued = false;
