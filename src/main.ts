@@ -2,7 +2,7 @@ import { type EditorView } from '@codemirror/view';
 import { App, ButtonComponent, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, setIcon } from 'obsidian';
 import { clearMutableTail, setMutableTail, whisperLocalMutableTailExtension } from './mutable-tail-widget';
 import { DEFAULT_SETTINGS, normalizeSettings, type WhisperLocalPluginSettings } from './settings';
-import { splitStableMutableTranscript, takeWordsRange } from './transcript-normalization';
+import { selectMostCompleteHypothesis, splitStableMutableTranscript, takeWordsRange } from './transcript-normalization';
 import { runWhisperCppDiagnostics, type WhisperCppDiagnosticsReport } from './whispercpp-diagnostics';
 import { WhisperCppDictationSession, type WhisperCppTranscriptUpdate } from './whispercpp-dictation';
 
@@ -503,12 +503,12 @@ export default class WhisperLocalPlugin extends Plugin {
 	}
 
 	private flushPendingSequenceTail(renderState: DictationRenderState, reason: string): void {
-		const latestHypothesis = renderState.sequenceHypotheses[renderState.sequenceHypotheses.length - 1];
-		if (!latestHypothesis) {
+		const bestHypothesis = selectMostCompleteHypothesis(renderState.sequenceHypotheses);
+		if (!bestHypothesis) {
 			return;
 		}
 
-		const pendingRemainder = takeWordsRange(latestHypothesis, renderState.sequenceStableWordCount);
+		const pendingRemainder = takeWordsRange(bestHypothesis, renderState.sequenceStableWordCount);
 		if (pendingRemainder.length > 0) {
 			this.commitTranscriptText(renderState, pendingRemainder);
 			this.logDebug('Flushed pending mutable tail.', {

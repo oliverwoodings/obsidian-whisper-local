@@ -11,6 +11,29 @@ export interface StableTranscriptSplit {
 	stableWordCount: number;
 }
 
+export function selectMostCompleteHypothesis(hypotheses: string[]): string {
+	let bestHypothesis = '';
+	let bestWordCount = 0;
+	for (const hypothesis of hypotheses) {
+		const trimmed = hypothesis.trim();
+		if (trimmed.length === 0) {
+			continue;
+		}
+
+		const wordCount = getWords(trimmed).length;
+		if (wordCount < bestWordCount) {
+			continue;
+		}
+
+		if (wordCount > bestWordCount || trimmed.length > bestHypothesis.length) {
+			bestHypothesis = trimmed;
+			bestWordCount = wordCount;
+		}
+	}
+
+	return bestHypothesis;
+}
+
 export function normalizeTranscriptChunk(
 	rawTranscript: string,
 	reason: TranscriptNormalizationReason,
@@ -26,7 +49,9 @@ export function normalizeTranscriptChunk(
 		return '';
 	}
 
-	text = trimLeadingWordOverlap(previousTranscript, text);
+	if (reason === 'max_duration') {
+		text = trimLeadingWordOverlap(previousTranscript, text);
+	}
 	text = text.replace(/\s+/g, ' ').trim();
 	if (text.length === 0) {
 		return '';

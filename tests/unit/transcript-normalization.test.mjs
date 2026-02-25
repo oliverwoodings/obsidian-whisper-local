@@ -4,6 +4,7 @@ import { loadTs } from '../helpers/load-ts.mjs';
 
 const {
 	normalizeTranscriptChunk,
+	selectMostCompleteHypothesis,
 	splitStableMutableTranscript,
 	takeWordsRange,
 } = loadTs('../../src/transcript-normalization.ts');
@@ -26,13 +27,20 @@ test('normalizeTranscriptChunk keeps repeated words spoken intentionally', () =>
 	);
 });
 
-test('normalizeTranscriptChunk trims leading overlap with previous committed transcript', () => {
+test('normalizeTranscriptChunk does not trim overlap for silence chunks', () => {
 	assert.equal(
 		normalizeTranscriptChunk('we continue from here', 'silence', 'and then we continue'),
+		'we continue from here',
+	);
+});
+
+test('normalizeTranscriptChunk trims leading overlap for max-duration chunks', () => {
+	assert.equal(
+		normalizeTranscriptChunk('we continue from here', 'max_duration', 'and then we continue'),
 		'from here',
 	);
 	assert.equal(
-		normalizeTranscriptChunk('continue from here', 'silence', 'we continue'),
+		normalizeTranscriptChunk('continue from here', 'max_duration', 'we continue'),
 		'continue from here',
 	);
 });
@@ -62,6 +70,17 @@ test('splitStableMutableTranscript grows stable prefix from local agreement', ()
 	assert.equal(second.stableWordCount, 2);
 	assert.equal(second.stableText, 'hello there');
 	assert.equal(second.mutableText, 'friend');
+});
+
+test('selectMostCompleteHypothesis prefers the richest hypothesis when latest regresses', () => {
+	assert.equal(
+		selectMostCompleteHypothesis(['alpha beta gamma', 'alpha beta']),
+		'alpha beta gamma',
+	);
+	assert.equal(
+		selectMostCompleteHypothesis(['alpha beta', 'alpha beta gamma']),
+		'alpha beta gamma',
+	);
 });
 
 test('takeWordsRange returns requested word spans', () => {
