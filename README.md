@@ -6,17 +6,13 @@ Obsidian plugin for local, private live dictation via [whisper.cpp](https://gith
 
 ## Prerequisites
 
-- macOS (whisper service management in this repo uses `launchd`)
+- macOS
 - Node.js 18+ and npm
-- CMake
-- Git
-- curl
+- A local whisper runtime. This repo now delegates runtime setup to the shared sibling repo `~/repos/personal/whisper-local-runtime` by default.
 
 ## Quick start (unpublished plugin)
 
-This plugin is not published in Obsidian Community Plugins yet, so install it manually.
-
-1. Clone this repository and build the plugin:
+1. Clone and build this plugin:
 
 ```bash
 git clone <repo-url>
@@ -25,60 +21,46 @@ npm install
 npm run build
 ```
 
-2. Install into your vault's plugins folder (use your vault path):
+2. Clone or create the shared runtime repo alongside it:
+
+```bash
+cd ~/repos/personal
+git clone <runtime-repo-url> whisper-local-runtime
+cd whisper-local-runtime
+npm run whisper:setup
+npm run whisper:start
+```
+
+Default runtime URL:
+
+```text
+http://127.0.0.1:8080
+```
+
+3. Install the plugin into your vault:
 
 ```bash
 mkdir -p "/path/to/YourVault/.obsidian/plugins"
 ln -s "$(pwd)" "/path/to/YourVault/.obsidian/plugins/obsidian-whisper-local"
 ```
 
-3. In Obsidian, open **Settings -> Community plugins**:
+4. In Obsidian, open **Settings -> Community plugins**:
 - Disable restricted mode if needed.
 - Enable `Whisper Local`.
 
-4. Set up and start local whisper.cpp (macOS):
-
-```bash
-npm run whisper:setup
-npm run whisper:start
-```
-
-5. Plugin settings are usable out of the box (defaults):
+5. Plugin settings are usable out of the box:
 - Base URL: `http://127.0.0.1:8080`
 - Language: `en`
 
-Only change these in **Settings -> Community plugins -> Whisper Local** if your setup differs (for example, different port or language).
-
-Optional tuning (same settings panel):
-- Partial update interval (ms)
-- Partial minimum voiced audio (ms)
-- Stabilization agreement window
-- Mutable tail opacity
+Only change these in **Settings -> Community plugins -> Whisper Local** if your setup differs.
 
 6. Use commands:
 - `Whisper Local: Start live dictation`
 - `Whisper Local: Stop live dictation`
 
-Or use the ribbon button to toggle live dictation on/off.
+## Shared runtime commands
 
-Optional: bind these commands to hotkeys in **Settings -> Hotkeys** for faster start/stop control.
-
-## Development
-
-```bash
-npm install
-npm run dev
-```
-
-Build:
-
-```bash
-npm run build
-```
-
-## Local whisper.cpp setup
-
-The repository includes helper scripts in `whisper/` for local server setup on macOS:
+This repo still exposes the same npm commands, but they delegate to the shared runtime repo:
 
 ```bash
 npm run whisper:setup
@@ -90,14 +72,7 @@ npm run whisper:install-service
 npm run whisper:uninstall
 ```
 
-- `whisper:setup` copies `whisper/.env` from `whisper/.env.example`, clones/builds whisper.cpp natively, downloads the configured model, and installs a macOS `launchd` service.
-- `whisper:start` starts the `launchd` service.
-- `whisper:stop` stops the `launchd` service.
-- `whisper:status` prints `launchd` service status.
-- `whisper:logs` tails service stdout/stderr logs configured in `whisper/.env`.
-- `whisper:install-service` rewrites/reinstalls the `launchd` plist from current `.env` values.
-- `whisper:uninstall` unloads and removes the `launchd` service plist.
-- Service defaults are generic and user-portable (`$HOME/Library/LaunchAgents/...`), and can be changed via `whisper/.env`.
+By default they look for `../whisper-local-runtime`. Override with `WHISPER_RUNTIME_REPO=/custom/path/to/whisper-local-runtime` if needed.
 
 ## Architecture
 
@@ -113,36 +88,12 @@ npm run whisper:uninstall
 - `src/whispercpp-http.ts`
   - whisper.cpp HTTP endpoint helpers and multipart WAV transcription request builder.
 - `src/transcript-normalization.ts`
-  - Transcript cleanup and stabilization helpers (non-speech token filtering, boundary overlap stitching, and local-agreement splitting).
+  - Transcript cleanup and stabilization helpers.
 - `src/mutable-tail-widget.ts`
-  - CodeMirror extension for rendering provisional transcript tail text as non-editable, grey inline ghost text.
+  - CodeMirror extension for rendering provisional transcript tail text.
 - `src/whispercpp-diagnostics.ts`
-  - Connectivity and compatibility checks for whisper.cpp endpoints and local runtime prerequisites.
+  - Connectivity and compatibility checks for whisper.cpp endpoints and browser capabilities.
 - `whisper/`
-  - Local whisper.cpp server helper scripts and environment-based configuration (`.env`).
+  - Thin delegation scripts that forward runtime commands to the shared whisper runtime repo.
 - `tests/`
   - Node test runner suites for unit/integration tests.
-
-### Dependency direction
-
-- `src/main.ts` may import from `src/settings.ts`.
-- `src/main.ts` may import from `src/whispercpp-dictation.ts`.
-- `src/main.ts` may import from `src/whispercpp-diagnostics.ts`.
-- `src/main.ts` may import from `src/mutable-tail-widget.ts`.
-- `src/main.ts` may import from `src/transcript-normalization.ts`.
-- `src/whispercpp-dictation.ts` may import from `src/whispercpp-http.ts`.
-- `src/whispercpp-dictation.ts` may import from `src/transcript-normalization.ts`.
-- `src/whispercpp-diagnostics.ts` may import from `src/whispercpp-http.ts`.
-- `src/settings.ts` should stay framework-light and focus on data normalization.
-
-### Runtime flow
-
-1. Obsidian loads the plugin entrypoint (`src/main.ts`).
-2. Settings are loaded and normalized.
-3. Commands and settings tab are registered.
-4. Starting live dictation captures microphone audio in-browser.
-5. The dictation session applies lightweight VAD to segment utterances and sends periodic partial hypothesis requests while speech is active.
-6. Audio segments are sent to `whisper.cpp` `/inference` as WAV multipart requests.
-7. Transcript updates are normalized and stitched, then stabilized via local agreement (stable prefix committed, mutable suffix kept provisional).
-8. The committed text is inserted into the editor while provisional tail text is shown as a grey, non-editable inline widget.
-9. Diagnostics can be run from settings or command palette to validate endpoint health, inference readiness, and browser capabilities.
