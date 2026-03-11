@@ -8,7 +8,7 @@ Obsidian plugin for local, private live dictation via [whisper.cpp](https://gith
 
 - macOS
 - Node.js 18+ and npm
-- A local whisper runtime. This repo now delegates runtime setup to the shared sibling repo `~/repos/personal/whisper-local-runtime` by default.
+- A local whisper runtime. Check out https://github.com/oliverwoodings/whisper-local-runtime for a quick option on macOS
 
 ## Quick start (unpublished plugin)
 
@@ -21,21 +21,6 @@ npm install
 npm run build
 ```
 
-2. Clone or create the shared runtime repo alongside it:
-
-```bash
-cd ~/repos/personal
-git clone <runtime-repo-url> whisper-local-runtime
-cd whisper-local-runtime
-npm run whisper:setup
-npm run whisper:start
-```
-
-Default runtime URL:
-
-```text
-http://127.0.0.1:8080
-```
 
 3. Install the plugin into your vault:
 
@@ -48,8 +33,8 @@ ln -s "$(pwd)" "/path/to/YourVault/.obsidian/plugins/obsidian-whisper-local"
 - Disable restricted mode if needed.
 - Enable `Whisper Local`.
 
-5. Plugin settings are usable out of the box:
-- Base URL: `http://127.0.0.1:8080`
+5. Plugin settings are usable out of the box if you are leveraging [whisper-local-runtime](https://github.com/oliverwoodings/whisper-local-runtime):
+- Base URL: `http://127.0.0.1:8080` (change if you are running whisper on a different port)
 - Language: `en`
 
 Only change these in **Settings -> Community plugins -> Whisper Local** if your setup differs.
@@ -58,9 +43,9 @@ Only change these in **Settings -> Community plugins -> Whisper Local** if your 
 - `Whisper Local: Start live dictation`
 - `Whisper Local: Stop live dictation`
 
-## Shared runtime commands
+## Shared [whisper-local-runtime](https://github.com/oliverwoodings/whisper-local-runtime) commands
 
-This repo still exposes the same npm commands, but they delegate to the shared runtime repo:
+This repo exposes whisper runtime commands, delegated to the shared runtime repo if available:
 
 ```bash
 npm run whisper:setup
